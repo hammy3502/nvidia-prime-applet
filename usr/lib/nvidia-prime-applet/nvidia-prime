@@ -34,7 +34,12 @@ class Tray:
 
         self.icon = XApp.StatusIcon()
         self.icon.set_name("nvidia-prime")
+        self.switching_to = None  # When a mode switch is "queued", this is the mode being switched to
+        self.switching_from = None  # When a mode switch is "queued", this is the mode being switched from
+        self.integrated_is_intel = integrated_is_intel
+        self.set_right_click_menu()
 
+    def set_right_click_menu(self):
         hybrid_supported = self.should_show_hybrid()
 
         # Find GPU name
@@ -44,7 +49,7 @@ class Tray:
         except:
             pass
 
-        if integrated_is_intel:
+        if self.integrated_is_intel:
             integrated_icon_name = "prime-tray-intel-symbolic"
             integrated_mode = INTEL_MODE
         else:
@@ -52,29 +57,42 @@ class Tray:
             integrated_mode = AMD_MODE
 
         # Find active mode
-        nvidia = Gtk.MenuItem(label=_("Switch to: %s") % NVIDIA_MODE)
-        nvidia.connect("activate", self.switch, 'nvidia', NVIDIA_MODE)
+
+        if self.switching_from is None:
+            active_gpu = get_output(["prime-select", "query"])
+            if (active_gpu == "nvidia"):
+                self.icon.set_icon_name("prime-tray-nvidia-symbolic")
+                mode = NVIDIA_MODE
+            elif (active_gpu == "on-demand"):
+                self.icon.set_icon_name(integrated_icon_name)
+                mode = ON_DEMAND_MODE
+            elif (active_gpu == "intel"):
+                self.icon.set_icon_name(integrated_icon_name)
+                mode = integrated_mode
+            else:
+                self.icon.set_icon_name("dialog-error-symbolic")
+                mode = _("Unknown mode")
+        else:
+            mode = self.switching_from
+
+        if self.switching_from is not None and self.switching_from == NVIDIA_MODE:
+            nvidia = Gtk.MenuItem(label=_("Switch back to: %s") % NVIDIA_MODE)
+        else:
+            nvidia = Gtk.MenuItem(label=_("Switch to: %s") % NVIDIA_MODE)
+        nvidia.connect("activate", self.switch, 'nvidia', NVIDIA_MODE, mode)
 
         if hybrid_supported:
-            ondemand = Gtk.MenuItem(label=_("Switch to: %s") % ON_DEMAND_MODE)
-            ondemand.connect("activate", self.switch, 'on-demand', ON_DEMAND_MODE)
+            if self.switching_from is not None and self.switching_from == ON_DEMAND_MODE:
+                ondemand = Gtk.MenuItem(label=_("Switch back to: %s") % ON_DEMAND_MODE)
+            else:
+                ondemand = Gtk.MenuItem(label=_("Switch to: %s") % ON_DEMAND_MODE)
+            ondemand.connect("activate", self.switch, 'on-demand', ON_DEMAND_MODE, mode)
 
-        integrated = Gtk.MenuItem(label=_("Switch to: %s") % integrated_mode)
-        integrated.connect("activate", self.switch, 'intel', integrated_mode)
-
-        active_gpu = get_output(["prime-select", "query"])
-        if (active_gpu == "nvidia"):
-            self.icon.set_icon_name("prime-tray-nvidia-symbolic")
-            mode = NVIDIA_MODE
-        elif (active_gpu == "on-demand"):
-            self.icon.set_icon_name(integrated_icon_name)
-            mode = ON_DEMAND_MODE
-        elif (active_gpu == "intel"):
-            self.icon.set_icon_name(integrated_icon_name)
-            mode = integrated_mode
+        if self.switching_from is not None and self.switching_from == integrated_mode:
+            integrated = Gtk.MenuItem(label=_("Switch back to: %s") % integrated_mode)
         else:
-            self.icon.set_icon_name("dialog-error-symbolic")
-            mode = _("Unknown mode")
+            integrated = Gtk.MenuItem(label=_("Switch to: %s") % integrated_mode)
+        integrated.connect("activate", self.switch, 'intel', integrated_mode, mode)
 
         menu = Gtk.Menu()
 
@@ -87,15 +105,21 @@ class Tray:
             menu.append(item)
             menu.append(Gtk.SeparatorMenuItem())
 
-        item = Gtk.MenuItem(label=_("Active profile: %s") % mode)
+        if self.switching_from is None:
+            mode_to_check = mode
+            item = Gtk.MenuItem(label=_("Active profile: %s") % mode_to_check)
+        else:
+            mode_to_check = self.switching_to
+            item = Gtk.MenuItem(label=_("Will switch to: %s") % mode_to_check)
+
         item.set_sensitive(False)
         menu.append(item)
 
-        if mode != integrated_mode:
+        if mode_to_check != integrated_mode:
             menu.append(integrated)
-        if mode != NVIDIA_MODE:
+        if mode_to_check != NVIDIA_MODE:
             menu.append(nvidia)
-        if mode != ON_DEMAND_MODE and hybrid_supported:
+        if mode_to_check != ON_DEMAND_MODE and hybrid_supported:
             menu.append(ondemand)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -143,7 +167,7 @@ class Tray:
     def dialog_closed(self, widget, event):
         return Gtk.ResponseType.NO
 
-    def switch(self, widget, mode, mode_description):
+    def switch(self, widget, mode, mode_description, old_mode):
         dialog = Gtk.MessageDialog(parent=None, message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.YES_NO, text=_("Are you sure you want to switch to %s?") % mode_description)
         dialog.format_secondary_text(_('Changes will take effect after you log out and log back in.'))
         dialog.set_deletable(False)
@@ -155,7 +179,14 @@ class Tray:
         response = dialog.run()
         dialog.destroy()
         if response == Gtk.ResponseType.YES:
-            subprocess.call(["pkexec", "prime-select", mode])
+            return_code = subprocess.call(["pkexec", "prime-select", mode])
+            if return_code == 0:
+                if self.switching_from == mode_description:  # Reset switching_from if going back to where we started
+                    self.switching_from = None
+                elif self.switching_from is None:  # Only set if switching from currently active mode
+                    self.switching_from = old_mode
+                self.switching_to = mode_description
+                self.set_right_click_menu()
 
     def about(self, widget):
         about = Gtk.AboutDialog()
